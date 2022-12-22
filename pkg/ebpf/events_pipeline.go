@@ -163,7 +163,11 @@ func (t *Tracee) decodeEvents(outerCtx context.Context) (<-chan *trace.Event, <-
 			for i := 0; i < int(ctx.Argnum); i++ {
 				argMeta, argVal, err := bufferdecoder.ReadArgFromBuff(ebpfMsgDecoder, eventDefinition.Params)
 				if err != nil {
-					t.handleError(fmt.Errorf("failed to read argument %d of event %s: %v", i, eventDefinition.Name, err))
+					//t.handleError(fmt.Errorf("failed to read argument %d of event %s: %v", i, eventDefinition.Name, err))
+					args = append(args, trace.Argument{ArgMeta: trace.ArgMeta{
+						Name: "orierror",
+						Type: "int",
+					}, Value: -1})
 					continue
 				}
 
@@ -461,3 +465,4 @@ func (t *Tracee) parseArguments(e *trace.Event) error {
 
 	return nil
 }
+

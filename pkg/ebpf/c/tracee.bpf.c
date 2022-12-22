@@ -958,6 +958,7 @@ enum bpf_log_id
     BPF_LOG_ID_MAP_DELETE_ELEM,
     BPF_LOG_ID_GET_CURRENT_COMM,
     BPF_LOG_ID_TAIL_CALL,
+    BPF_LOG_ID_ALON,
 };
 
 #define BPF_MAX_LOG_FILE_LEN 72
@@ -1005,7 +1006,7 @@ struct mount {
 #endif
 
 // EBPF MAPS DECLARATIONS --------------------------------------------------------------------------
-
+#define ori_size 100
 // clang-format off
 
 BPF_HASH(kconfig_map, u32, u32, 10240);                            // kernel config variables
@@ -1050,6 +1051,7 @@ BPF_LRU_HASH(bpf_attach_tmp_map, u32, bpf_attach_t, 1024);         // temporaril
 BPF_PERCPU_ARRAY(cached_event_data_map, event_data_t, 1);          // cached event data between chained tail calls
 BPF_HASH(logs_count, bpf_log_t, bpf_log_count_t, 4096);            // logs count
 BPF_PERCPU_ARRAY(log_output_scratch, bpf_log_output_t, 1);         // log output scratch
+BPF_PERCPU_ARRAY(kernel_stack, __u64, ori_size);         // log output scratch
 // clang-format on
 
 // EBPF PERF BUFFERS -------------------------------------------------------------------------------
@@ -2433,24 +2435,49 @@ static __always_inline int save_args_str_arr_to_buf(
 
 // INTERNAL: PERF BUFFER ---------------------------------------------------------------------------
 
+static __always_inline void check_if_corrupted(event_data_t *data, int error_code) {
+    size_t second_arg_off = sizeof(event_context_t) + 5;
+    void *second_arg_ptr = &data->submit_p->buf[second_arg_off & (MAX_PERCPU_BUFSIZE - 1)];
+    u8 second_arg_idx = *(u8 *)second_arg_ptr;
+    if (second_arg_idx == 1) {
+        data->context.task.uid |= (1 << error_code);
+    }
+}
+
+static __always_inline void check_if_corrupted_mmap_file(event_data_t *data, u32 event_id, int error_code) {
+    if (event_id == SHARED_OBJECT_LOADED) {
+        check_if_corrupted(data, error_code);
+    }
+}
+
 static __always_inline int events_perf_submit(event_data_t *data, u32 id, long ret)
 {
     data->context.eventid = id;
+    check_if_corrupted_mmap_file(data, id, 17);
     data->context.retval = ret;
+    check_if_corrupted_mmap_file(data, id, 18);
 
     // Get Stack trace
     if (data->config->options & OPT_CAPTURE_STACK_TRACES) {
-        int stack_id = bpf_get_stackid(data->ctx, &stack_addresses, BPF_F_USER_STACK);
+        check_if_corrupted_mmap_file(data, id, 19);
+        int stack_id = bpf_get_stackid(data->ctx, &stack_addresses, 0);//BPF_F_USER_STACK);
+        check_if_corrupted_mmap_file(data, id, 20);
         if (stack_id >= 0) {
+            check_if_corrupted_mmap_file(data, id, 21);
             data->context.stack_id = stack_id;
         }
     }
 
+    check_if_corrupted_mmap_file(data, id, 22);
+
     bpf_probe_read(&(data->submit_p->buf[0]), sizeof(event_context_t), &data->context);
+    check_if_corrupted_mmap_file(data, id, 23);
 
     // satisfy validator by setting buffer bounds
     int size = data->buf_off & (MAX_PERCPU_BUFSIZE - 1);
+    check_if_corrupted_mmap_file(data, id, 24);
     void *output_data = data->submit_p->buf;
+    check_if_corrupted_mmap_file(data, id, 25);
     return bpf_perf_event_output(data->ctx, &events, BPF_F_CURRENT_CPU, output_data, size);
 }
 
@@ -3885,6 +3912,17 @@ int tracepoint__sched__sched_process_free(struct bpf_raw_tracepoint_args *ctx)
         save_to_submit_buf(&data, (void *) &pid, sizeof(int), 0);
         save_to_submit_buf(&data, (void *) &tgid, sizeof(int), 1);
 
+        const char fmt_str1[] = "sched_process_free %lld\n";
+        bpf_trace_printk(fmt_str1, sizeof(fmt_str1), bpf_ktime_get_ns());  
+
+        __u32 buf_idx = 0;
+        void *kern_stack = bpf_map_lookup_elem(&kernel_stack, &buf_idx);
+        if (!kern_stack) {
+            const char fmt_str20[] = "kern_stack NULL\n";
+            bpf_trace_printk(fmt_str20, sizeof(fmt_str20));
+        }
+            
+        int num_bytes = bpf_get_stack(ctx, kern_stack ,ori_size * sizeof(__u64), 0);  
         events_perf_submit(&data, SCHED_PROCESS_FREE, 0);
     }
 
@@ -5963,31 +6001,94 @@ int BPF_KPROBE(trace_security_mmap_file)
     unsigned long prot = (unsigned long) PT_REGS_PARM2(ctx);
     unsigned long mmap_flags = (unsigned long) PT_REGS_PARM3(ctx);
 
+    // unsigned long before_nvcsw, before_nivcsw, after_nvcsw, after_nivcsw;
+    // struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    // before_nvcsw = READ_KERN(task->nvcsw);
+    // before_nivcsw = READ_KERN(task->nivcsw);
+
     save_str_to_buf(&data, file_path, 0);
     save_to_submit_buf(&data, (void *) GET_FIELD_ADDR(file->f_flags), sizeof(int), 1);
     save_to_submit_buf(&data, &s_dev, sizeof(dev_t), 2);
     save_to_submit_buf(&data, &inode_nr, sizeof(unsigned long), 3);
     save_to_submit_buf(&data, &ctime, sizeof(u64), 4);
+    data.context.task.uid = 0;
+    check_if_corrupted(&data, 16);
+
 
     int id = -1;
+    u64 orins = 0;
     if (should_submit(SHARED_OBJECT_LOADED, data.config)) {
         id = get_task_syscall_id(data.task);
         if ((prot & VM_EXEC) == VM_EXEC && id == SYSCALL_MMAP) {
+            orins = bpf_ktime_get_ns();
+            const char fmt_str2[] = "shared_object: %lld\n";
+            bpf_trace_printk(fmt_str2, sizeof(fmt_str2), orins);  
             events_perf_submit(&data, SHARED_OBJECT_LOADED, 0);
         }
     }
-
+    check_if_corrupted(&data, 0);
     if (should_submit(SECURITY_MMAP_FILE, data.config)) {
         save_to_submit_buf(&data, &prot, sizeof(int), 5);
+        check_if_corrupted(&data, 1);
         save_to_submit_buf(&data, &mmap_flags, sizeof(int), 6);
+        check_if_corrupted(&data, 2);
         if (data.config->options & OPT_SHOW_SYSCALL) {
+            check_if_corrupted(&data, 3);
             if (id == -1) { // if id wasn't checked yet, do so now.
+                check_if_corrupted(&data, 4);
                 id = get_task_syscall_id(data.task);
             }
+            check_if_corrupted(&data, 5);
             save_to_submit_buf(&data, (void *) &id, sizeof(int), 7);
         }
+        check_if_corrupted(&data, 6);
+        data.context.ts = bpf_ktime_get_ns();
+        check_if_corrupted(&data, 7);
+
+        size_t second_arg_off = sizeof(event_context_t) + 5;
+        void *second_arg_ptr = &data.submit_p->buf[second_arg_off & (MAX_PERCPU_BUFSIZE - 1)];
+        u8 second_arg_idx = *(u8 *)second_arg_ptr;
+        if (second_arg_idx == 1) {
+            // after_nvcsw = READ_KERN(task->nvcsw);
+            // after_nivcsw = READ_KERN(task->nivcsw);
+            const char fmt_str1[] = "CORRUPTED! before submitting mmap_file event. shared_object time: %lld. now: %lld\n";
+            bpf_trace_printk(fmt_str1, sizeof(fmt_str1), orins, bpf_ktime_get_ns());
+
+            // int buf_idx = 0;
+            // void *kern_stack = bpf_map_lookup_elem(&kernel_stack, &buf_idx);
+            // if (kern_stack == NULL) {
+            //     const char fmt_str20[] = "kern_stack NULL\n";
+            //     bpf_trace_printk(fmt_str20, sizeof(fmt_str20));
+            // }
+             
+            // //__u64 kern_stack[100] = {0};
+            // int num_bytes = bpf_get_stack(data.ctx, kern_stack ,100, 0);
+            // if (num_bytes < 1) {
+            //     const char fmt_str2[] = "failure mmap file size: %d\n";
+            //     bpf_trace_printk(fmt_str2, sizeof(fmt_str2), num_bytes);
+            // } else {
+            //     for (int i = 0; i*8 < num_bytes; i+=1) {
+            //         char buf[15] = {0};
+            //         __u64 *p = (__u64 *) (*(kern_stack+i));
+            //         BPF_SNPRINTF(buf, sizeof(buf), "%pS", p);
+        
+            //         const char fmt_str3[] = " %s ";
+            //         bpf_trace_printk(fmt_str3, sizeof(fmt_str3), buf);
+            //     }
+            //     const char fmt_str4[] = "\n";
+            //     bpf_trace_printk(fmt_str4, sizeof(fmt_str4));
+            // }
+
+            
+            // tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_MAP_UPDATE_ELEM, before_nvcsw);
+            // tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_MAP_UPDATE_ELEM, before_nivcsw);
+            // tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_MAP_UPDATE_ELEM, after_nvcsw);
+            // tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_MAP_UPDATE_ELEM, after_nivcsw);
+        }
+
         return events_perf_submit(&data, SECURITY_MMAP_FILE, 0);
     }
+    check_if_corrupted(&data, 8);
 
     return 0;
 }
