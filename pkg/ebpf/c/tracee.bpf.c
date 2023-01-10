@@ -3915,14 +3915,14 @@ int tracepoint__sched__sched_process_free(struct bpf_raw_tracepoint_args *ctx)
         const char fmt_str1[] = "sched_process_free %lld\n";
         bpf_trace_printk(fmt_str1, sizeof(fmt_str1), bpf_ktime_get_ns());  
 
-        __u32 buf_idx = 0;
-        void *kern_stack = bpf_map_lookup_elem(&kernel_stack, &buf_idx);
-        if (!kern_stack) {
-            const char fmt_str20[] = "kern_stack NULL\n";
-            bpf_trace_printk(fmt_str20, sizeof(fmt_str20));
-        }
+        // __u32 buf_idx = 0;
+        // void *kern_stack = bpf_map_lookup_elem(&kernel_stack, &buf_idx);
+        // if (!kern_stack) {
+        //     const char fmt_str20[] = "kern_stack NULL\n";
+        //     bpf_trace_printk(fmt_str20, sizeof(fmt_str20));
+        // }
             
-        int num_bytes = bpf_get_stack(ctx, kern_stack ,ori_size * sizeof(__u64), 0);  
+        // int num_bytes = bpf_get_stack(ctx, kern_stack ,ori_size * sizeof(__u64), 0);  
         events_perf_submit(&data, SCHED_PROCESS_FREE, 0);
     }
 
@@ -6021,9 +6021,11 @@ int BPF_KPROBE(trace_security_mmap_file)
         id = get_task_syscall_id(data.task);
         if ((prot & VM_EXEC) == VM_EXEC && id == SYSCALL_MMAP) {
             orins = bpf_ktime_get_ns();
-            const char fmt_str2[] = "shared_object: %lld\n";
+            const char fmt_str2[] = "shared_object: before submit %lld\n";
             bpf_trace_printk(fmt_str2, sizeof(fmt_str2), orins);  
             events_perf_submit(&data, SHARED_OBJECT_LOADED, 0);
+            const char fmt_str3[] = "shared_object: after submit %lld\n";
+            bpf_trace_printk(fmt_str3, sizeof(fmt_str3), bpf_ktime_get_ns());  
         }
     }
     check_if_corrupted(&data, 0);
