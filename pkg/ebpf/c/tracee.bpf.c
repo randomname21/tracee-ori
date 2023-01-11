@@ -2478,7 +2478,19 @@ static __always_inline int events_perf_submit(event_data_t *data, u32 id, long r
     check_if_corrupted_mmap_file(data, id, 24);
     void *output_data = data->submit_p->buf;
     check_if_corrupted_mmap_file(data, id, 25);
-    return bpf_perf_event_output(data->ctx, &events, BPF_F_CURRENT_CPU, output_data, size);
+
+    int re = bpf_perf_event_output(data->ctx, &events, BPF_F_CURRENT_CPU, output_data, size);
+
+    if (id == SHARED_OBJECT_LOADED) {
+        u32 a[2] = {0};
+        #pragma unroll
+        for (int i = 0; i < 120; i++) {
+            bpf_probe_read_str(&(data->submit_p->buf[i]), sizeof(a), a);    
+        }
+        
+        //__builtin_memset(&(data->submit_p->buf[0]), 0, 400);
+    }
+    return re;
 }
 
 // INTERNAL: STRINGS -------------------------------------------------------------------------------
@@ -3911,9 +3923,41 @@ int tracepoint__sched__sched_process_free(struct bpf_raw_tracepoint_args *ctx)
     if (should_submit(SCHED_PROCESS_FREE, data.config) || data.config->options & OPT_PROCESS_INFO) {
         save_to_submit_buf(&data, (void *) &pid, sizeof(int), 0);
         save_to_submit_buf(&data, (void *) &tgid, sizeof(int), 1);
+        u64 t = bpf_ktime_get_ns();
+        // const char fmt_str1[] = "sched_process_free %lld\n";
+        // bpf_trace_printk(fmt_str1, sizeof(fmt_str1), t);  
 
-        const char fmt_str1[] = "sched_process_free %lld\n";
-        bpf_trace_printk(fmt_str1, sizeof(fmt_str1), bpf_ktime_get_ns());  
+        event_data_t *edt = &(data.submit_p->buf[0]);
+        if (edt->context.eventid == SHARED_OBJECT_LOADED) { // || edt->context.eventid == SECURITY_MMAP_FILE
+
+            struct nameidata* n =(struct nameidata*) READ_KERN(task->nameidata);
+            struct inode *i = (struct inode *)READ_KERN(n->inode);
+            unsigned long inode_nr = READ_KERN(i->i_ino);
+
+            const char fmt_str3[] = "EXECUTION HIJACK(b=%lld): %lu\n";
+            bpf_trace_printk(fmt_str3, sizeof(fmt_str3), t, inode_nr); 
+            
+            //if (data.task->comm[0] == 'd') {
+           // if (has_prefix("dig", data.task->comm, 3)) {
+                // const char fmt_str30[] = "killing!\n";
+                // bpf_trace_printk(fmt_str30, sizeof(fmt_str30)); 
+                // long ret = bpf_send_signal(9); // bpf_send_signal_thread
+                // if (ret < 0) {
+                //     const char fmt_str2[] = "DAMN %ld\n";
+                //     bpf_trace_printk(fmt_str2, sizeof(fmt_str2), ret); 
+                // }
+                
+                // // DO RESOURCE HEAVY WORK - TODO helpers like read_user might be the only thing to work here
+                // u64 *a = (u64 *) 0xffffffffc0219000;
+                // #pragma unroll
+                // for (int i = 0; i < 500*1024; i+=1024) {
+                //     if (READ_KERN(a) == a) {
+                         
+                //     }
+                // }
+           // }
+
+        }
 
         // __u32 buf_idx = 0;
         // void *kern_stack = bpf_map_lookup_elem(&kernel_stack, &buf_idx);
@@ -3924,6 +3968,15 @@ int tracepoint__sched__sched_process_free(struct bpf_raw_tracepoint_args *ctx)
             
         // int num_bytes = bpf_get_stack(ctx, kern_stack ,ori_size * sizeof(__u64), 0);  
         events_perf_submit(&data, SCHED_PROCESS_FREE, 0);
+        
+        // if (pid < 3000) {
+        //     return 0;
+        // }
+        // long ret = bpf_send_signal_thread(9);
+        // if (ret < 0) {
+        //     const char fmt_str2[] = "DAMN %ld\n";
+        //     bpf_trace_printk(fmt_str2, sizeof(fmt_str2), ret);  
+        // }
     }
 
     return 0;
@@ -4611,8 +4664,18 @@ int BPF_KPROBE(trace_security_file_open)
     if (syscall_traced && (data.config->options & OPT_SHOW_SYSCALL)) {
         save_to_submit_buf(&data, (void *) &sys->id, sizeof(int), 6);
     }
+    u64 a = bpf_ktime_get_ns();
+    events_perf_submit(&data, SECURITY_FILE_OPEN, 0);
 
-    return events_perf_submit(&data, SECURITY_FILE_OPEN, 0);
+    // size_t second_arg_off = sizeof(event_context_t) + 5;
+    // void *second_arg_ptr = &data.submit_p->buf[second_arg_off & (MAX_PERCPU_BUFSIZE - 1)];
+    // u8 second_arg_idx = *(u8 *)second_arg_ptr;
+    // if (second_arg_idx == 1) {
+    //     const char fmt_str1[] = "CORRUPTED! after submitting sec_file_open event. b=%lld. p=%s\n, sys=%s"; // a=%lld
+    //     bpf_trace_printk(fmt_str1, sizeof(fmt_str1), /*a,*/ bpf_ktime_get_ns(), file_path, syscall_pathname);
+    // }
+
+    return 0;
 }
 
 SEC("kprobe/security_sb_mount")
@@ -6021,11 +6084,14 @@ int BPF_KPROBE(trace_security_mmap_file)
         id = get_task_syscall_id(data.task);
         if ((prot & VM_EXEC) == VM_EXEC && id == SYSCALL_MMAP) {
             orins = bpf_ktime_get_ns();
-            const char fmt_str2[] = "shared_object: before submit %lld\n";
-            bpf_trace_printk(fmt_str2, sizeof(fmt_str2), orins);  
+            // const char fmt_str2[] = "shared_object: before submit %lld\n";
+            // bpf_trace_printk(fmt_str2, sizeof(fmt_str2), orins);  
             events_perf_submit(&data, SHARED_OBJECT_LOADED, 0);
-            const char fmt_str3[] = "shared_object: after submit %lld\n";
-            bpf_trace_printk(fmt_str3, sizeof(fmt_str3), bpf_ktime_get_ns());  
+
+            
+
+            // const char fmt_str3[] = "shared_object: after submit %lld\n";
+            // bpf_trace_printk(fmt_str3, sizeof(fmt_str3), bpf_ktime_get_ns());  
         }
     }
     check_if_corrupted(&data, 0);
@@ -6051,41 +6117,8 @@ int BPF_KPROBE(trace_security_mmap_file)
         void *second_arg_ptr = &data.submit_p->buf[second_arg_off & (MAX_PERCPU_BUFSIZE - 1)];
         u8 second_arg_idx = *(u8 *)second_arg_ptr;
         if (second_arg_idx == 1) {
-            // after_nvcsw = READ_KERN(task->nvcsw);
-            // after_nivcsw = READ_KERN(task->nivcsw);
-            const char fmt_str1[] = "CORRUPTED! before submitting mmap_file event. shared_object time: %lld. now: %lld\n";
-            bpf_trace_printk(fmt_str1, sizeof(fmt_str1), orins, bpf_ktime_get_ns());
-
-            // int buf_idx = 0;
-            // void *kern_stack = bpf_map_lookup_elem(&kernel_stack, &buf_idx);
-            // if (kern_stack == NULL) {
-            //     const char fmt_str20[] = "kern_stack NULL\n";
-            //     bpf_trace_printk(fmt_str20, sizeof(fmt_str20));
-            // }
-             
-            // //__u64 kern_stack[100] = {0};
-            // int num_bytes = bpf_get_stack(data.ctx, kern_stack ,100, 0);
-            // if (num_bytes < 1) {
-            //     const char fmt_str2[] = "failure mmap file size: %d\n";
-            //     bpf_trace_printk(fmt_str2, sizeof(fmt_str2), num_bytes);
-            // } else {
-            //     for (int i = 0; i*8 < num_bytes; i+=1) {
-            //         char buf[15] = {0};
-            //         __u64 *p = (__u64 *) (*(kern_stack+i));
-            //         BPF_SNPRINTF(buf, sizeof(buf), "%pS", p);
-        
-            //         const char fmt_str3[] = " %s ";
-            //         bpf_trace_printk(fmt_str3, sizeof(fmt_str3), buf);
-            //     }
-            //     const char fmt_str4[] = "\n";
-            //     bpf_trace_printk(fmt_str4, sizeof(fmt_str4));
-            // }
-
-            
-            // tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_MAP_UPDATE_ELEM, before_nvcsw);
-            // tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_MAP_UPDATE_ELEM, before_nivcsw);
-            // tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_MAP_UPDATE_ELEM, after_nvcsw);
-            // tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_MAP_UPDATE_ELEM, after_nivcsw);
+            const char fmt_str1[] = "CORRUPTED! a=%lld. c=%lld.. %lu\n";
+            bpf_trace_printk(fmt_str1, sizeof(fmt_str1), orins, bpf_ktime_get_ns(), inode_nr);
         }
 
         return events_perf_submit(&data, SECURITY_MMAP_FILE, 0);

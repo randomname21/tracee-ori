@@ -273,6 +273,7 @@ struct task_struct {
     void *stack;
     struct sighand_struct *sighand;
     unsigned long nvcsw, nivcsw;
+    struct nameidata		*nameidata;
 };
 
 typedef struct {
@@ -602,6 +603,10 @@ typedef __s64 time64_t;
 struct timespec64 {
     time64_t tv_sec;
     long int tv_nsec;
+};
+
+struct nameidata {
+	struct inode	*inode; /* path.dentry.d_inode */;	
 };
 
 struct inode {
@@ -1139,3 +1144,4 @@ struct icmp6hdr {
 #pragma clang attribute pop
 
 #endif /* __VMLINUX_H__ */
+
